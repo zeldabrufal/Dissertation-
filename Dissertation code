@@ -1,0 +1,1480 @@
+library("librarian")
+librarian::shelf(ggplot2, tidyr, dplyr, stringr, purrr, tidylog, magrittr, readr, here, janitor,
+                 lubridate, readxl)
+library(zoo)
+
+
+####################################
+# CLEANIING AND FORMATTING Z DATA
+#####################################
+
+
+setwd("")
+
+raw_dir_paths <- list.dirs(path = (""), recursive = FALSE, full.names = TRUE)
+
+
+file_paths_list <- lapply(raw_dir_paths, function(dir_path) {
+  list.files(path = dir_path, pattern = '*.txt', recursive = TRUE, full.names = TRUE)
+})
+
+raw_file_paths <- unlist(file_paths_list, recursive = TRUE)
+
+
+data_list <- list()
+
+
+
+# Loop through each file path
+for (file_path in raw_file_paths) {
+  # Extract the identifier from the file path
+  identifier <- gsub(".*/Log-(.*)\\.txt", "\\1", file_path)
+  
+  # Read the file into a data frame
+  df <- read.delim(file_path, header = FALSE, sep = ";", fill = TRUE, stringsAsFactors = FALSE)
+  
+  # Store the data frame in the list with the identifier as the name
+  data_list[[identifier]] <- df
+}
+
+
+
+
+Rectlist <- data_list[sapply(data_list, function(df) any(grepl("Rect", unlist(df))))]
+
+
+View(Rectlist)
+
+### removing rect files (these files were corrupted so unreadable for data analysis) #####
+
+
+raw_file_paths <- raw_file_paths[-c(28:32)]
+raw_file_paths <- raw_file_paths[-c(28:35)]
+raw_file_paths <- raw_file_paths[-c(60:67)]
+raw_file_paths <- raw_file_paths[-c(68)]
+raw_file_paths <- raw_file_paths[-c(79:85)]
+raw_file_paths <- raw_file_paths[-c(73)]
+
+
+
+
+data_list <- data_list[!sapply(data_list, function(df) any(grepl("Rect", unlist(df))))]
+
+
+
+#removing 6th column
+
+
+for (i in seq_along(data_list)) {
+  # Check if the data frame has 6 columns
+  if (ncol(data_list[[i]]) == 6) {
+    # Remove the 6th column
+    data_list[[i]] <- data_list[[i]][, -6]
+  }
+}
+
+
+
+data_list <- Filter(function(df) ncol(df) == 5, data_list)
+
+
+extract_z_number <- function(file_path) {
+  z_number <- gsub(".*/[Zz](\\d+)/.*", "\\1", file_path)
+  return(z_number)
+}
+
+
+
+for (i in seq_along(raw_file_paths)) {
+  # Extract z number from the file name
+  z_number <- extract_z_number(raw_file_paths[i])
+  
+# Add ppid column to the data frame with "z" prefix
+  data_list[[i]]$ppid <- paste0("z", z_number)
+}
+
+
+
+
+
+
+zdata <- do.call(rbind, data_list)
+
+colnames(zdata) <- c("NA", "Event", "Date", "NodeInfo", "App", "ppid")
+
+
+
+zdata %<>% 
+  filter(!grepl("TYPE_WINDOWS_CHANGED|TYPE_WINDOW_STATE_CHANGED", Event))
+
+#Removing all the events that aren't on an app that aren't screen on or screen off
+
+zdata <- zdata %>%
+  filter(!(App == "" & NodeInfo != 0))
+
+
+######Only keeping the columns I want and reordering them 
+
+zdata <- zdata %>%
+  select("ppid", "Event", "Date", "App")
+
+new_order <- c("ppid", "Event", "Date", "App")
+zdata <- zdata[new_order]
+
+
+####### getting rid of milliseconds 
+
+zdata$Date <- round_date(as.POSIXct(zdata$Date), unit = "seconds")
+
+
+#replacing blank App values (i.e. on or off rows) with "NA" (not the best way but is a way)
+zdata$App <- ifelse(zdata$App == "", "NA", zdata$App)
+
+
+#####arranging by ppid and date
+
+zdata <- arrange(zdata, ppid, Date)
+
+###############################################
+# CLEANING MDATA
+###############################################
+
+setwd("")
+MData <- read.csv("")
+
+
+
+######################SORTING AND CLEANING THE DATA##########################
+
+
+#Removing all the time zones and turing into time format 
+
+
+MData$Date <- gsub("\\s[A-Za-z]+\\s\\d{4}$", "", MData$Date)
+MData$Date <- as.POSIXct(MData$Date, format = "%a %b %d %H:%M:%S ")
+
+
+#AData = grouped by ppid and date 
+
+AData <- arrange(MData, ppid, Date)
+
+
+#Removing adata participants that just didn't work 
+
+AData <- AData  %>%
+  filter(ppid != "ETE)")
+
+
+AData <- AData  %>%
+  filter(ppid != "CUTW")
+
+AData <- AData  %>%
+  filter(ppid != "CQNF")
+
+
+AData <- AData  %>%
+  select(ppid, Event, Date, App)
+
+
+
+########### COMBINING DATA SETS #################
+
+
+AData <- rbind(AData, zdata)
+
+
+
+######## removing the non event days 
+
+
+AData <- AData %>%
+  mutate(Session_ID = cumsum(Event == "TYPE_SCREEN_Mode_on"))
+
+AData$Session_ID <- AData$Session_ID + 1
+
+
+#removing the weird non events 
+
+AData <- AData %>%
+  group_by(Session_ID)%>%
+  mutate(Session_OFF = cumsum(Event == "TYPE_SCREEN_Mode_off"))
+
+AData <- AData %>%
+  filter(!(Session_OFF == 1 & Event != "TYPE_SCREEN_Mode_off" | Session_OFF >= 2 ))
+
+
+View(AData)
+
+
+
+############ itaco issue identifier
+
+
+AData <- AData %>%
+  group_by(ppid)%>%
+  mutate(Time_Diff_between_rows = c( 0 , diff(Date))) 
+
+
+
+AData <- AData %>%
+  mutate(iTACODown = Time_Diff_between_rows >= 57600)
+
+
+AData <- AData %>%
+  group_by(ppid)%>%
+  mutate(iTACOPeriod = cumsum(iTACODown == TRUE))
+
+AData <- AData %>%
+  group_by(ppid, iTACOPeriod) %>%
+  mutate(Time_Since_Down = as.numeric(Date - first(Date)))
+
+
+AData <- AData %>%
+  group_by(ppid)%>%
+  mutate(New_Day = ceiling(Time_Since_Down / 86400))
+
+AData$New_Day <- ifelse(AData$New_Day == 0, 1, AData$New_Day)
+
+AData <- AData %>%
+  group_by(ppid)%>%
+  mutate(Day_no = cumsum(New_Day != lag(New_Day) | Time_Since_Down == 0 ))
+
+
+AData$Day_no <- ifelse(AData$Day_no == 0, 1, AData$Day_no)
+
+
+
+
+
+########### FULL DAY CHECKER ##############
+
+
+
+FullDayStart <- AData %>%
+  group_by(ppid,Day_no) %>%
+  slice(1)%>%
+  ungroup()
+
+FullDayStart <- subset(FullDayStart, select = c(ppid, Date, Day_no))
+
+
+colnames(FullDayStart) <- c("ppid", "Day_Start", "Day_no")
+
+
+#Checking out when the last event for each day was
+
+FullDayEnd <- AData %>%
+  group_by(ppid,Day_no) %>%
+  slice(n())%>%
+  ungroup()
+
+
+FullDayEnd <- subset(FullDayEnd, select = c(ppid, Date, Day_no))
+
+colnames(FullDayEnd) <- c("ppid", "Day_End", "Day_no")
+
+FullDayChecker <- FullDayStart
+
+FullDayChecker$Day_End <- FullDayEnd$Day_End
+
+
+
+##### Finding 'dodgy' days, i.e. days where there is less than 8 hours between the first entry of that day and the last
+
+FullDayChecker <- FullDayChecker %>%
+  mutate(Time_Diff = as.numeric(difftime(Day_End, Day_Start, units = "secs")))
+
+FullDayChecker <- FullDayChecker %>%
+  mutate(dodgy = Time_Diff < 28800)
+
+
+View(FullDayChecker)
+
+
+
+
+######## creating days to keep 
+
+Days_To_Keep <- FullDayChecker %>%
+  filter(! dodgy == "TRUE")
+
+View(Days_To_Keep)
+
+
+ParticipantNumDays <- Days_To_Keep %>%
+  group_by(ppid) %>%
+  mutate(NumDays = n_distinct(Day_no))
+
+View(ParticipantNumDays)
+
+
+
+adatappid <- unique((AData$ppid))
+print(adatappid)
+
+
+##### at the moment not worrying about if they have less than 3 full days of data- will need to decide 
+
+
+##### removing all the rows from AData that are not on this list
+
+AData <- semi_join(AData, Days_To_Keep, by = c("ppid", "Day_no"))
+
+
+
+
+
+############# SESSION ASSIGNING ##########################
+
+#ID ing each session within each participant , but this time events between off and on events will be identified as a session
+
+
+AData <- AData %>%
+  ungroup() %>%
+  mutate(Session_ID = cumsum(
+    Event == "TYPE_SCREEN_Mode_on" |
+      Event == "TYPE_SCREEN_Mode_off" |
+      Day_no != lag(Day_no, default = first(Day_no)) |
+      (Event != "TYPE_SCREEN_Mode_on" & Time_Diff_between_rows >= 14400) |
+      ppid != lag(ppid, default = first(ppid))
+  ))
+
+
+AData$Session_ID <- AData$Session_ID + 1
+
+AData <- AData %>%
+  mutate(Session_ID = if_else(
+    Event == "TYPE_SCREEN_Mode_off" & 
+      lead(Event) == "TYPE_SCREEN_Mode_on" & 
+      lag(Event) != "TYPE_SCREEN_Mode_on" & lag(Event) != "TYPE_SCREEN_Mode_off",
+    Session_ID - 1, Session_ID))
+
+
+
+#####################################################################################
+
+
+
+############################# FFEATURE EXTRACTION #############################
+
+
+#####################################################################################
+
+
+
+
+
+#Finding the number of sessions per 24 hour period 
+
+Num_Sessions_Day <- AData %>%
+  group_by(ppid, Day_no) %>%
+  summarise(Num_Sessions = n_distinct(Session_ID))
+
+#Finding mean no. sessions per day per ppid 
+
+SummaryData <- Num_Sessions_Day %>%
+  group_by(ppid) %>%
+  summarise(Mean_session_per_day = mean(Num_Sessions, na.rm = TRUE))
+
+#CALCULATING session durations
+
+session_duration <- AData %>%
+  group_by(ppid, Session_ID) %>%
+  summarize(ppid = first(ppid),
+            Session_Start = min(Date),
+            Session_End = max(Date),
+            Day_no = first(Day_no))
+
+session_duration <- session_duration %>%
+  mutate(Session_Duration = as.numeric(difftime(Session_End, Session_Start, units = "secs")))
+
+#Summing all session durations per day for each participant 
+
+Daily_Screen_Time <- session_duration %>%
+  group_by(ppid, Day_no) %>%
+  summarise(Total_Session_Duration_per_day = sum(Session_Duration, na.rm = TRUE))
+
+View(session_duration)
+
+#Finding mean daily screen time per participant 
+
+MDaily_Screen_Time <- Daily_Screen_Time %>%
+  group_by(ppid) %>%
+  summarise(Mean_Daily_Screen_Time = mean(Total_Session_Duration_per_day))
+
+
+
+#Creating a summary data frame with individual days ByDaySummaryData 
+
+ByDaySummaryData <- Daily_Screen_Time
+ByDaySummaryData$Num_Sessions_Day <- Num_Sessions_Day$Num_Sessions
+
+#Creating a 'means' summary data frame called MeanDaySummaryData 
+
+MeanDaySummaryData <- inner_join(SummaryData, MDaily_Screen_Time, by = "ppid")
+
+
+
+#MEAN SESSION DURATION PER DAY 
+
+View(AData)
+
+ByDaySummaryData$ByDayMeanSessionDuration <- ByDaySummaryData$Total_Session_Duration_per_day / ByDaySummaryData$Num_Sessions_Day
+
+
+View(ByDaySummaryData)
+
+#Finding Mean session duration and putting it in mean summary data 
+
+Mean_Session_Duration <- ByDaySummaryData %>%
+  group_by(ppid) %>%
+  summarise(Mean_Session_Duration = mean(ByDayMeanSessionDuration))
+
+MeanDaySummaryData$Mean_Session_Duration <- Mean_Session_Duration$Mean_Session_Duration
+
+
+###### assinging app sessions #########
+
+AData$App <- ifelse(is.na(AData$App) , "NA", AData$App)
+
+
+AData <- AData %>%
+  ungroup() %>%
+  mutate(app_session_ID = cumsum(App != lag(App, default = first(App))))
+
+AData$app_session_ID <- ifelse(AData$app_session_ID == 0, 1, AData$app_session_ID)
+
+AData <- AData %>%
+  mutate(app_session_ID = ifelse(App == "NA", NA , app_session_ID  ))
+
+
+#Finding number of app_sessions per person per day, . 
+
+Num_App_Sessions_Day <- AData %>%
+  group_by(ppid, Day_no) %>%
+  summarise(Num_App_Sessions = n_distinct(app_session_ID))
+
+#Putting into by day summary data 
+
+ByDaySummaryData$Num_App_Sessions_Day <- Num_App_Sessions_Day$Num_App_Sessions
+
+
+#Finding  mean num app sessions per day
+
+Mean_Num_App_Sessions_Day <-Num_App_Sessions_Day %>%
+  group_by(ppid) %>%
+  summarise(Mean_Num_App_Sessions_Day = mean(Num_App_Sessions))
+
+#Putting mean no. app sessions per day into Summary Data 
+
+SummaryData$Mean_Num_App_Sessions_Day <- Mean_Num_App_Sessions_Day$Mean_Num_App_Sessions_Day
+
+
+#Finding app_session durations 
+
+#only keeping rows that are an app use- i.e. removing all the screen locks and unlocks. I helpfully (not) labelled these as character "NA"
+
+app_session_duration <- AData %>%
+  filter(App != "NA")
+
+app_session_duration <- app_session_duration %>%
+  group_by(ppid, Day_no, app_session_ID,) %>%
+  summarize(ppid = first(ppid),
+            App = first(App),
+            App_Session_Start = min(Date),
+            App_Session_End = max(Date),
+            Day_no = first(Day_no))
+
+View(app_session_duration)
+
+app_session_duration <- app_session_duration %>%
+  mutate(app_session_duration = as.numeric(difftime(App_Session_End, App_Session_Start, units = "secs")))
+
+
+#Finding no. app_sessions within each session 
+
+Num_App_Sessions_P_S <- AData %>%
+  group_by(ppid, Day_no, Session_ID)%>%
+  summarise(Num_App_Sessions_P_S = n_distinct(app_session_ID) )%>%
+  ungroup()
+
+#Finding mean no. apps per session per day 
+
+Mean_No_App_Sessions_P_S <- Num_App_Sessions_P_S %>%
+  group_by(ppid, Day_no) %>%
+  summarise(Mean_num_app_session_p_s = mean(Num_App_Sessions_P_S, na.rm = TRUE))
+
+#Putting mean no. app sessions per session per day into the by day summary data.  
+
+ByDaySummaryData$Mean_num_app_session_p_s <- Mean_No_App_Sessions_P_S$Mean_num_app_session_p_s
+
+
+
+View(AData)
+
+#Finding mean no. app sessions (mean of the daily mean) per person and putting it into the mean summary table 
+
+
+Mean_app_sessions_P_S_across_days <- Mean_No_App_Sessions_P_S %>%
+  group_by(ppid) %>%
+  summarise(Mean_app_sessions_P_S_across_days = mean(Mean_num_app_session_p_s))
+
+
+MeanDaySummaryData$Mean_app_sessions_P_S_across_days <- Mean_app_sessions_P_S_across_days$Mean_app_sessions_P_S_across_days
+
+#### putting it into summary data 
+
+SummaryData$MeanAppSessionPerSession <- MeanDaySummaryData$Mean_app_sessions_P_S_across_days
+
+#Finding average sub session duration (NOT ROUNDING UP TO ONE)
+
+
+#Finding total app session duration per day per participant 
+
+
+Daily_App_Screen_Time <- app_session_duration %>%
+  group_by(ppid, Day_no) %>%
+  summarise(Total_App_Session_Duration_per_day = sum(app_session_duration, na.rm = TRUE))
+
+#putting it in by day summTotal_App_Session_Duration_per_day#putting it in by day summary data
+
+ByDaySummaryData$Total_App_Session_Duration_per_day <- Daily_App_Screen_Time$Total_App_Session_Duration_per_day
+
+#Actually creating fragmented measure D
+
+
+ByDaySummaryData$AppSessionDuration <- ByDaySummaryData$Total_App_Session_Duration_per_day /ByDaySummaryData$Num_App_Sessions_Day
+
+AppSessionDuration <- ByDaySummaryData %>%
+  group_by(ppid) %>%
+  summarise(AppSessionDuration = mean(AppSessionDuration))
+
+
+SummaryData$AppSessionDuration <- AppSessionDuration$AppSessionDuration
+
+#######putting all the stuff from MeanDaySummaryData into SummaryData cos they are the same thing
+
+
+SummaryData$Mean_Session_Duration <- MeanDaySummaryData$Mean_Session_Duration
+SummaryData$Mean_Daily_Screen_Time <-MeanDaySummaryData$Mean_Daily_Screen_Time
+
+colnames(MeanDaySummaryData)
+colnames(SummaryData)
+
+View(SummaryData)
+View(ByDaySummaryData)
+
+
+##########################################################################
+###########. MENTAL HEALTH QUESTIONNAIRE THINGS ##########################
+##########################################################################
+
+
+#################. THEIR PARTICIPANTS MHQ STUFF ADDING TO THE DATA SET  #####
+
+
+QData <- read.csv("")
+View(QData)
+
+
+#renaming first column to be ppid like the other data set 
+
+QData <- QData %>%
+  rename(ppid = ResponseId)
+
+colnames(QData)
+
+QData <- QData %>%
+  select(ppid, phq_rawScore, GAD_RawScore, OCD_RawScore)
+
+
+
+names(QData) <- c("ppid", "PHQ.Score", "GAD.Score", "OCD.Score")
+
+View(QData)
+
+
+
+########################SORTING OUT YOUR PARTICIPANTS MHQ ######################
+
+library(zoo)
+
+
+MParts <- read.csv("")
+
+
+MParts <- MParts[ ,c(18:148)]
+
+#manually putting z17 in cos they forgot to enter their id 
+
+MParts[16, 1] <- "z17"
+
+#getting rid of test entires and the first two rows  
+
+MParts <- subset(MParts, MParts[,1] != "")
+MParts <- subset(MParts, MParts[,1] != " ")
+MParts <- subset(MParts, MParts[,1] != "")
+MParts <- subset(MParts, MParts[,1] != "test ")
+MParts <- subset(MParts, MParts[,1] != "test 1")
+MParts <- subset(MParts, MParts[,1] != "")
+MParts <- MParts[-1, ]
+MParts <- MParts[-1, ]
+
+
+#PHQ
+
+recode.rules.PHQ  <- list(
+  "Not at all" = 0,
+  "Several days" = 1,
+  "More than half the days" = 2,
+  "Nearly every day" = 3
+)
+
+#GAD
+
+recode.rules.GAD <- list(
+  "not at all" = 0,
+  "several days" = 1,
+  "more than half the days" = 2,
+  "nearly every day" = 3
+)
+
+#OCD 
+
+recode.rules.OCD <- list(
+  "Not at all" = 0,
+  "A little" = 1,
+  "Moderately" = 2,
+  "A lot" = 3,
+  "Extremely" = 4
+)
+
+View(MParts)
+
+
+#Recoding PHQ questions 
+
+colnames(MParts)
+
+str(MParts)
+
+
+
+MParts <- MParts %>%
+  mutate_at(vars(80:87), ~recode(., !!!recode.rules.PHQ))
+
+# Recoding GAD
+
+MParts <- MParts %>% 
+  mutate_at(vars(88:94), ~recode(., !!!recode.rules.GAD))
+
+#Recoding OCD 
+
+MParts <- MParts %>% 
+  mutate_at(vars(95:113), ~recode(., !!!recode.rules.OCD))
+
+
+#Creating the total scores for each participant 
+
+MParts$PHQ.Score <- rowSums(MParts[, c(80:87)])
+MParts$GAD.Score <- rowSums(MParts[, c(88:94)])
+MParts$OCD.Score <- rowSums(MParts[, c(95:113)])
+
+
+
+View(MParts)
+
+SummaryMParts <-MParts[ ,c(1,132:134)]
+
+
+names(SummaryMParts) <- c("ppid","PHQ.Score", "GAD.Score", "OCD.Score")
+
+
+SummaryMParts$ppid <- gsub("Z", "z", SummaryMParts$ppid)
+
+View(MParts)
+
+######## Merging my mhq with mexico 
+
+QData <- rbind(QData, SummaryMParts)
+
+###### merging w the phone data
+
+
+
+valid_ppids <- unique(AData$ppid)
+
+QData <- QData %>%
+  filter(ppid %in% valid_ppids)
+
+proper_valid_ppids <- unique(QData$ppid)
+
+SummaryData <- SummaryData %>%
+  filter(ppid %in% proper_valid_ppids)
+
+SummaryData<- merge(SummaryData, QData, by = "ppid")
+
+View(SummaryData)
+
+
+
+
+###############################################################################
+###### DATA ANALYSIS AND GRAPHS ####################
+
+install.packages('BayesFactor')
+library("BayesFactor")
+
+## mean session duration ######
+
+
+ggplot(SummaryData, aes(x= MinutesSessionDuration, y = GAD.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Session Duration (minutes)", y = "Anxiety    (GAD Score)") +
+  ggtitle("Relationship between session duration and Anxiety")+
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+SummaryData$MinutesSessionDuration <- SummaryData$Mean_Session_Duration / 60
+
+Mean_Session_DurationGADmodel <- lm(GAD.Score ~ Mean_Session_Duration, SummaryData )
+summary(Mean_Session_DurationGADmodel)
+
+
+bfFAGAD <- lmBF(GAD.Score ~ Mean_Fragmented_A, SummaryData )
+summary(bfFAGAD)
+
+plot(Mean_Session_DurationGADmodel, 1)
+plot(Mean_Session_DurationGADmodel, 3)
+durbinWatsonTest(FA_GADmodel)
+
+
+
+
+ggplot(SummaryData, aes(x= MinutesSessionDuration, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Mean session duration (minutes)", y = "Depression  (PHQ Score)") +
+  ggtitle("Relationship between session duration and depression")+
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+
+
+Mean_Session_Durationphqmodel <- lm(PHQ.Score ~ Mean_Session_Duration, SummaryData )
+summary(Mean_Session_Durationphqmodel)
+
+
+
+
+bfFAphq <- lmBF(PHQ.Score ~ Mean_Fragmented_A, SummaryData )
+summary(bfFAphq)
+
+durbinWatsonTest(FA_phqmodel)
+
+
+plot(FA_phqmodel, 1)
+plot(FA_phqmodel, 3)
+
+ggplot(SummaryData, aes(x= Mean_Fragmented_A, y = OCD.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "FMA Score", y = "OCD (OCI-R") +
+  ggtitle("Relationship between FMA Score and OCD")+
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+FA_OCFmodel <- lm(OCD.Score ~ Mean_Fragmented_A, SummaryData )
+summary(FA_OCFmodel)
+
+
+
+####### Pickups 
+
+ggplot(SummaryData, aes(x= Mean_session_per_day, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Mean no. Pickups per day", y = "Depression  (PHQ Score)") +
+  ggtitle("Relationship between Smartphone Pickups and Depression")+
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+
+PickupDepressionModel <- lm(PHQ.Score ~ Mean_session_per_day, SummaryData )
+summary(PickupDepressionModel)
+
+
+bfpickupPHQ <- lmBF(PHQ.Score ~ Mean_session_per_day, SummaryData )
+summary(bfpickupPHQ)
+
+
+plot(PickupDepressionModel, 1)
+durbinWatsonTest(PickupDepressionModel)
+plot(PickupDepressionModel, 3)
+
+ggplot(SummaryData, aes(x= Mean_session_per_day, y = GAD.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Mean no. Pickups per day", y = "Anxiety    (GAD Score)") +
+  ggtitle("Relationship between Smartphone Pickups and Anxiety")+
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 18))+
+  theme(plot.title = element_text(hjust=0.5))
+
+PickupAnxietyModel <- lm(GAD.Score ~ Mean_session_per_day, SummaryData )
+summary(PickupAnxietyModel)
+
+bfpickupGAD <- lmBF(GAD.Score ~ Mean_session_per_day, SummaryData )
+summary(bfpickupGAD)
+
+plot(PickupAnxietyModel, 1)
+durbinWatsonTest(PickupAnxietyModel)
+plot(PickupAnxietyModel, 3)
+
+ggplot(SummaryData, aes(x= Mean_session_per_day, y = OCD.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Mean no. Pickups per day", y = "OCD (OCI-R") +
+  ggtitle("Relationship between Smartphone Pickups and OCD")+
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+PickupocdModel <- lm(OCD.Score ~ Mean_session_per_day, SummaryData )
+summary(PickupocdModel)
+
+
+
+########### Scren Time Models #############################
+
+
+ggplot(SummaryData, aes(x= Mean_Daily_Screen_Time, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean Daily Screen Time", y = "Depression (PHQ Score)") +
+  ggtitle("Relationship between Screen Time and Depression") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+Screen_TimePHQmodel <- lm(PHQ.Score ~ Mean_Daily_Screen_Time, SummaryData )
+summary(Screen_TimePHQmodel)
+
+
+BFScreenTimePHQ <- lmBF(PHQ.Score ~ Mean_Daily_Screen_Time, SummaryData )
+summary(BFScreenTimePHQ)
+
+plot(Screen_TimePHQmodel, 1)
+durbinWatsonTest(Screen_TimePHQmodel)
+
+plot(Screen_TimePHQmodel, 3)
+
+
+ggplot(SummaryData, aes(x= Mean_Daily_Screen_Time, y = GAD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean Daily Screen Time", y = "Anxiety    (GAD Score)") +
+  ggtitle("Relationship between Screen Time and Anxiety") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+Screen_TimeGADmodel <- lm(GAD.Score ~ Mean_Daily_Screen_Time, SummaryData )
+summary(Screen_TimeGADmodel)
+
+
+
+BFScreenTimeGAD <- lmBF(GAD.Score ~ Mean_Daily_Screen_Time, SummaryData )
+summary(BFScreenTimeGAD)
+
+
+durbinWatsonTest(Screen_TimeGADmodel)
+
+plot(Screen_TimeGADmodel, 1)
+plot(Screen_TimeGADmodel, 3)
+
+ggplot(SummaryData, aes(x= Mean_Daily_Screen_Time, y = OCD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean Daily Screen Time", y = "OCD  (OCI-R)") +
+  ggtitle("Relationship between Screen Time and OCD") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+Screen_TimeOCDmodel <- lm(OCD.Score ~ Mean_Daily_Screen_Time, SummaryData )
+summary(Screen_TimeOCDmodel)
+
+
+
+######## sub sessions per day 
+
+
+
+ggplot(SummaryData, aes(x= Mean_Num_App_Sessions_Day, y = GAD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean no. sub sessions per day", y = "Anxiety    (GAD Score)") +
+  ggtitle("Relationship between no. sub-sessions per day and Anxiety") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+App_Sessions_GADmodel <- lm(GAD.Score ~ Mean_Num_App_Sessions_Day, SummaryData )
+summary(App_Sessions_GADmodel)
+
+BFsubGAD <- lmBF(GAD.Score ~ Mean_Num_App_Sessions_Day, SummaryData)
+summary(BFsubGAD)
+
+plot(App_Sessions_GADmodel, 1)
+plot(App_Sessions_GADmodel, 3)
+
+durbinWatsonTest(App_Sessions_GADmodel)
+View(SummaryData)
+
+
+ggplot(SummaryData, aes(x= Mean_Num_App_Sessions_Day, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean no. sub sessions per day", y = "Depression   (PHQ Score)") +
+  ggtitle("Relationship between no. sub-sessions per day and Depression") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+App_Sessions_phqmodel <- lm(PHQ.Score ~ Mean_Num_App_Sessions_Day, SummaryData )
+summary(App_Sessions_phqmodel)
+
+BFsubphq <- lmBF(PHQ.Score ~ Mean_Num_App_Sessions_Day, SummaryData)
+summary(BFsubphq)
+
+
+
+plot(App_Sessions_phqmodel, 1)
+
+plot(App_Sessions_phqmodel, 3)
+durbinWatsonTest(App_Sessions_phqmodel)
+
+ggplot(SummaryData, aes(x= Mean_Num_App_Sessions_Day, y = OCD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean no. sub sessions per day", y = "OCD (OCI-R)") +
+  ggtitle("Relationship between no. sub-sessions per day and OCD") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+App_Sessions_OCDmodel <- lm(OCD.Score ~ Mean_Num_App_Sessions_Day, SummaryData )
+summary(App_Sessions_OCDmodel)
+
+
+
+
+############ mean app session duration 
+
+SummaryData$appsessionminute <- SummaryData$AppSessionDuration / 60
+
+
+ggplot(SummaryData, aes(x= appsessionminute, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  scale_x_continuous(expand=c(0, 0), limits=c(0, 10)) +
+  scale_y_continuous(expand=c(0, 0), limits=c(0, 24)) +
+  labs(x = "Mean sub-session duration (minutes)", y = "Depression   (PHQ Score)") +
+  ggtitle("Relationship between sub-session duration and Depression") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+AppSessionDurationphqmodel <- lm(PHQ.Score ~ AppSessionDuration, SummaryData )
+summary(AppSessionDurationphqmodel)
+
+
+BFfbphq <- lmBF(PHQ.Score ~ Mean_Fragmented_D, SummaryData)
+summary(BFfbphq)
+
+plot(FD_phqmodel, 1)
+plot(FD_phqmodel, 3)
+durbinWatsonTest(FD_phqmodel)
+
+ggplot(SummaryData, aes(x= AppSessionDuration, y = GAD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean sub-session duration (seconds)", y = "Anxiety   (GAD Score)") +
+  ggtitle("Relationship between sub-session duration and Anxiety") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+AppSessionDurationGADmodel <- lm(GAD.Score ~ AppSessionDuration, SummaryData )
+summary(AppSessionDurationGADmodel)
+
+
+BFfbgad <- lmBF(GAD.Score ~ Mean_Fragmented_D, SummaryData)
+summary(BFfbgad)
+
+
+
+plot(FD_GADmodel, 1)
+plot(FD_GADmodel, 3)
+durbinWatsonTest(FD_GADmodel)
+
+
+ggplot(SummaryData, aes(x= Mean_Fragmented_D, y = OCD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "FMB Score", y = "OCD  (OCI-R") +
+  ggtitle("Relationship between FMB Score and OCD") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+FD_OCDmodel <- lm(OCD.Score ~ Mean_Fragmented_D, SummaryData )
+summary(FD_OCDmodel)
+
+
+
+
+
+
+######### REMOVING OUTLIERS AND REPEATING THE APP ONES ###########
+
+
+
+
+
+SummaryData2 <- SummaryData %>%
+  filter(!(ppid == "z28" ))
+
+
+ggplot(SummaryData2, aes(x= Mean_Num_App_Sessions_Day, y = GAD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean no. sub sessions per day", y = "Anxiety    (GAD Score)") +
+  ggtitle("Relationship between no. sub-sessions per day and Anxiety") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+App_Sessions_GADmodel <- lm(GAD.Score ~ Mean_Num_App_Sessions_Day, SummaryData2 )
+summary(App_Sessions_GADmodel)
+
+BFsubGAD <- lmBF(GAD.Score ~ Mean_Num_App_Sessions_Day, SummaryData2)
+summary(BFsubGAD)
+
+
+ggplot(SummaryData2, aes(x= Mean_Num_App_Sessions_Day, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean no. sub sessions per day", y = "Depression   (PHQ Score)") +
+  ggtitle("Relationship between no. sub-sessions per day and Depression") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+App_Sessions_phqmodel <- lm(PHQ.Score ~ Mean_Num_App_Sessions_Day, SummaryData2 )
+summary(App_Sessions_phqmodel)
+
+
+BFsubphq <- lmBF(PHQ.Score ~ Mean_Num_App_Sessions_Day, SummaryData2)
+summary(BFsubphq)
+
+
+
+
+
+############ mean app session score 
+
+
+ggplot(SummaryData2, aes(x= AppSessionDuration, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = " mean sub-session duration (seconds)", y = "Depression   (PHQ Score)") +
+  ggtitle("Relationship between sub-session duration and Depression") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+AppSessionDurationphqmodel <- lm(PHQ.Score ~ AppSessionDuration, SummaryData2 )
+
+summary(AppSessionDurationphqmodel)
+
+
+
+FD_phqmodelBF <- lmBF(PHQ.Score ~ Mean_Fragmented_D, SummaryData2 )
+summary(FD_phqmodelBF)
+
+
+ggplot(SummaryData2, aes(x= AppSessionDuration, y = GAD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "mean sub-session duration (seconds)", y = "Anxiety   (GAD Score)") +
+  ggtitle("Relationship between sub-session duration and Anxiety") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+AppSessionDurationGADmodel <- lm(GAD.Score ~ AppSessionDuration, SummaryData2 )
+summary(AppSessionDurationGADmodel)
+
+
+
+
+BFfbgad <- lmBF(GAD.Score ~ Mean_Fragmented_D, SummaryData2)
+summary(BFfbgad)
+
+
+
+
+##### removing session durartion outliers 
+
+
+SummaryData3 <- SummaryData %>%
+  filter(!(ppid == "CLC2" | ppid == "CJ6L" ))
+
+
+
+Mean_Session_DurationGADmodel <- lm(PHQ.Score ~ Mean_Session_Duration, SummaryData3 )
+summary(Mean_Session_DurationGADmodel)
+
+
+######## violin plot for mental health 
+
+
+Gad.Score <- SummaryData$GAD.Score
+Phq.Score <- SummaryData$PHQ.Score
+
+
+combined_data <- data.frame(
+  Group = rep(c("GAD Score", "PHQ Score"), each = nrow(SummaryData)),
+  Value = c(Gad.Score,Phq.Score)
+)
+
+
+stats <-combined_data %>% 
+  group_by(Group) %>%
+  summarise(Mean = mean(Value), SD = sd(Value),
+            CI_L = Mean - (SD * 1.96)/sqrt(6),
+            CI_U = Mean + (SD * 1.96)/sqrt(6))
+
+
+View(stats)
+View(combined_data)
+
+
+print(Gad.Score)
+group_colors <- c("GAD Score" = "chocolate1", "PHQ Score" = "darkorchid3")
+
+
+combined_data <- merge(combined_data, stats, by = "Group")
+
+
+# Create the violin plot with error bars
+ggplot(combined_data, aes(x = Group, y = Value, fill = Group)) +
+  geom_violin() +
+  stat_summary(fun.y = mean, geom = "point", size = 2) +
+  geom_errorbar(aes(ymin = CI_L, ymax = CI_U), width = 0.2) +
+  scale_fill_manual(values = group_colors) +
+  labs(title = "Violin Plot of Mental Health Measures", x = "Mental Health Measure", y = "Score") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 20, hjust = 0.5),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 15)
+  )
+
+
+
+
+###### Creating the split plots
+
+
+GADSCOREPLOT <- combined_data%>%
+  filter(Group == "GAD Score")
+
+ggplot(GADSCOREPLOT, aes(x = Group, y = Value, fill = Group)) +
+  geom_violin() +
+  stat_summary(fun.y = mean, geom = "point", size = 2) +
+  geom_errorbar(aes(ymin = CI_L, ymax = CI_U), width = 0.1) +
+  scale_fill_manual(values = group_colors) +
+  labs(title = "Violin Plot of GAD-7 Scores",x = "" , y = "Score") +
+  geom_hline(yintercept=10, linetype="dashed", color = "black")+
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 20, hjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "gray", size = 0.5),
+    panel.grid.minor = element_line(color = "gray", size = 0.5)
+  )
+
+PHQSCOREPLOT <- combined_data%>%
+  filter(Group == "PHQ Score")
+
+ggplot(PHQSCOREPLOT, aes(x = Group, y = Value, fill = Group)) +
+  geom_violin() +
+  stat_summary(fun.y = mean, geom = "point", size = 2) +
+  geom_errorbar(aes(ymin = CI_L, ymax = CI_U), width = 0.1) +
+  scale_fill_manual(values = group_colors) +
+  labs(title = "Violin Plot of Mental Health Measures", x = "", y = "Score") +
+  geom_hline(yintercept=10, linetype="dashed", color = "black")+
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 20, hjust = 0.5),
+    axis.text = element_text(size = 13),
+    axis.title = element_text(size = 15),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "gray", size = 0.5),
+    panel.grid.minor = element_line(color = "gray", size = 0.5)
+  )
+
+)
+
+
+
+
+
+########## ARRANGING THE GRAPHS NICELY ###################
+
+
+
+############ ANIXETY ######
+
+
+library(gridExtra)
+# PICK UPS 
+
+a1<- ggplot(SummaryData, aes(x= Mean_session_per_day, y = GAD.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Mean no. Pickups per day", y = "Anxiety    (GAD Score)") +
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 18))+
+  theme(plot.title = element_text(hjust=0.5))
+
+
+# SESSION DURATION 
+
+a2 <- ggplot(SummaryData, aes(x= MinutesSessionDuration, y = GAD.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Session Duration (minutes)", y = "Anxiety    (GAD Score)") +
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+
+# SUB SESSION 
+
+a3 <- ggplot(SummaryData, aes(x= Mean_Num_App_Sessions_Day, y = GAD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean no. sub-sessions per day", y = "Anxiety    (GAD Score)") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+
+# SUB SESSION DURATION 
+
+
+a4 <- ggplot(SummaryData, aes(x= AppSessionDuration, y = GAD.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean sub-session duration (seconds)", y = "Anxiety   (GAD Score)") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+# GRID TIME 
+
+
+grid.arrange(a1, a2, a3, a4, nrow = 2, top = "")
+
+
+####### DEPRESSION ####################
+
+
+# PICKUPS 
+
+
+
+d1<- ggplot(SummaryData, aes(x= Mean_session_per_day, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Mean no. Pickups per day", y = "Depression  (PHQ Score)") +
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+
+# SESSION DURATION 
+
+
+
+d2 <- ggplot(SummaryData, aes(x= MinutesSessionDuration, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1")+
+  theme_bw()+
+  geom_smooth(method = "lm" , color = "darkorchid3", fill="blanchedalmond")+
+  labs(x = "Mean session duration (minutes)", y = "Depression  (PHQ Score)") +
+  theme(plot.title = element_text(face = "bold",
+                                  margin = margin(10, 0, 10, 0),
+                                  size = 14))+
+  theme(plot.title = element_text(hjust=0.5))
+
+
+
+#TOTAL SUB SESSIONS
+
+
+
+d3<- ggplot(SummaryData, aes(x= Mean_Num_App_Sessions_Day, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean no. sub-sessions per day", y = "Depression   (PHQ Score)") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+# SUB-SESSSION DURATION 
+
+
+d4<- ggplot(SummaryData, aes(x= appsessionminute, y = PHQ.Score)) +
+  geom_point(colour = "chocolate1") +
+  theme_bw() +
+  geom_smooth(method = "lm", color = "darkorchid3", fill = "blanchedalmond") +
+  labs(x = "Mean sub-session duration (minutes)", y = "Depression   (PHQ Score)") +
+  theme(
+    plot.title = element_text(face = "bold", margin = margin(10, 0, 10, 0), size = 14, hjust = 0.5)
+  )
+
+
+
+# grid 
+
+grid.arrange(d1, d2, d3, d4, nrow = 2, top = "")
+
+
+
+
+### DESCRIPTIVE STATISTICS THINGS
+
+
+
+
+print(adatappid)
+
+mean(SummaryData$GAD.Score)
+sd(SummaryData$GAD.Score)
+sd(SummaryData$PHQ.Score)
+mean(SummaryData$PHQ.Score)
+
+
+median(SummaryData$PHQ.Score)
+
+View(session_duration)
+median(session_duration$Session_Duration)
+IQR(session_duration$Session_Duration)
+phqCases <- SummaryData%>%
+  filter(PHQ.Score >= 10)
+
+View(app_session_duration)
+
+median(app_session_duration$app_session_duration)
+IQR(app_session_duration$app_session_duration)
+
+mean(SummaryData$PHQ.Score)
+mean(SummaryData$Mean_Daily_Screen_Time)
+sd(SummaryData$Mean_Daily_Screen_Time)
+
+
+mean(SummaryData$Mean_session_per_day)
+sd(SummaryData$Mean_session_per_day)
+View(AData)
+
+
+mean(SummaryData$Mean_Num_App_Sessions_Day)
+
+View(SummaryData2)
+
+sd(SummaryData$Mean_Num_App_Sessions_Day)
+
+numdaysppid <- ByDaySummaryData%>%
+  group_by(ppid)%>%
+  mutate(numdays = n_distinct(Day_no))
+
+View(numdaysppid)
+mean(numdaysppid$numdays)
+
+View(QData)
+
+View(app_session_duration)
+
+
+shortappsession <- app_session_duration%>%
+  filter(app_session_duration == 0)
+
+
+
+mean(SummaryData$Mean_Session_Duration)
+
+View(app_session_duration)
+
+median(Num_Sessions_Day$Num_Sessions)
+IQR(Num_Sessions_Day$Num_Sessions)
+median(Daily_Screen_Time$Total_Session_Duration_per_day)
+IQR(Daily_Screen_Time$Total_Session_Duration_per_day)
+
+median(Num_App_Sessions_Day$Num_App_Sessions)
+IQR(Num_App_Sessions_Day$Num_App_Sessions)
+mean(app_session_duration$app_session_duration)
+sd(app_session_duration$app_session_duration)
+
+sd(session_duration$Session_Duration)
